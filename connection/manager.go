@@ -95,5 +95,5 @@ func (c *Manager) AddConnectionToPool(destination *string, conn *websocket.Conn,
 	)
 
 	c.add(connectionID, connection)
-	connection.Start()
+	connection.start()
 }
