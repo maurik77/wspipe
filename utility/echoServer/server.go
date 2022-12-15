@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 )
 
 func main() {
@@ -14,7 +15,17 @@ func main() {
 
 	http.HandleFunc("/", manageRequest)
 	listen := fmt.Sprintf(":%v", *port)
-	http.ListenAndServe(listen, nil)
+
+	server := &http.Server{
+		Addr:              listen,
+		ReadHeaderTimeout: 3 * time.Second,
+	}
+
+	err := server.ListenAndServe()
+
+	if err != nil {
+		log.Print("ListenAndServe")
+	}
 }
 
 func manageRequest(w http.ResponseWriter, r *http.Request) {
@@ -23,8 +34,12 @@ func manageRequest(w http.ResponseWriter, r *http.Request) {
 	bodyContent, err := io.ReadAll(r.Body)
 
 	if len(bodyContent) == 0 || err != nil {
-		w.Write([]byte("Hello!"))
+		_, err = w.Write([]byte("Hello!"))
 	} else {
-		w.Write(bodyContent)
+		_, err = w.Write(bodyContent)
+	}
+
+	if err != nil {
+		log.Print("Write body response error")
 	}
 }

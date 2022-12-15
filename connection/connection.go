@@ -2,12 +2,12 @@ package connection
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -27,16 +27,16 @@ const (
 type connectionInstance struct {
 	// The websocket connection.
 	conn                   *websocket.Conn
-	httpDestinationBaseUrl string
+	httpDestinationBaseURL string
 	send                   chan []byte
 	id                     string
 	responseChannels       map[uuid.UUID]chan http.Response
 }
 
-func newInstance(conn *websocket.Conn, httpDestinationBaseUrl string, id string) *connectionInstance {
+func newInstance(conn *websocket.Conn, httpDestinationBaseURL string, id string) *connectionInstance {
 	connection := &connectionInstance{
 		conn:                   conn,
-		httpDestinationBaseUrl: httpDestinationBaseUrl,
+		httpDestinationBaseURL: httpDestinationBaseURL,
 		id:                     id,
 		send:                   make(chan []byte, 256),
 		responseChannels:       make(map[uuid.UUID]chan http.Response),
@@ -51,7 +51,7 @@ func (c *connectionInstance) Start() {
 }
 
 func (c *connectionInstance) sendResponseAsync(response *payload) error {
-	fmt.Printf("SendResponseAsync [%v]-> payload MessageType:%v, MessageId:%v\n", c.id, response.MessageType, response.MessageID)
+	log.Debug().Msgf("SendResponseAsync [%v]-> payload MessageType:%v, MessageId:%v\n", c.id, response.MessageType, response.MessageID)
 	binary, err := response.marshal()
 
 	if err == nil {
@@ -62,7 +62,7 @@ func (c *connectionInstance) sendResponseAsync(response *payload) error {
 }
 
 func (c *connectionInstance) sendRequestAsync(request *payload) (chan http.Response, error) {
-	fmt.Printf("SendRequestAsync [%v]-> payload MessageType:%v, MessageId:%v\n", c.id, request.MessageType, request.MessageID)
+	log.Debug().Msgf("SendRequestAsync [%v]-> payload MessageType:%v, MessageId:%v\n", c.id, request.MessageType, request.MessageID)
 	binary, err := request.marshal()
 	var responseChannel chan http.Response
 
@@ -72,12 +72,12 @@ func (c *connectionInstance) sendRequestAsync(request *payload) (chan http.Respo
 		c.send <- binary
 	}
 
-	fmt.Printf("SendRequestAsync [%v]-> Created response channel %v for MessageId:%v. Err:%v\n", c.id, responseChannel, request.MessageID, err)
+	log.Debug().Msgf("SendRequestAsync [%v]-> Created response channel %v for MessageId:%v. Err:%v\n", c.id, responseChannel, request.MessageID, err)
 	return responseChannel, err
 }
 
 func (c *connectionInstance) sendRequest(request *payload, maxWait time.Duration) (*http.Response, error) {
-	fmt.Printf("SendRequest [%v]-> payload MessageType:%v, MessageId:%v\n", c.id, request.MessageType, request.MessageID)
+	log.Debug().Msgf("SendRequest [%v]-> payload MessageType:%v, MessageId:%v\n", c.id, request.MessageType, request.MessageID)
 
 	responseChannel, err := c.sendRequestAsync(request)
 
@@ -90,11 +90,11 @@ func (c *connectionInstance) sendRequest(request *payload, maxWait time.Duration
 		ticker.Stop()
 	}()
 
-	fmt.Printf("SendRequest [%v]-> Received response channel %v for MessageId:%v.", c.id, responseChannel, request.MessageID)
+	log.Debug().Msgf("SendRequest [%v]-> Received response channel %v for MessageId:%v.", c.id, responseChannel, request.MessageID)
 
 	select {
 	case message, ok := <-responseChannel:
-		log.Printf("SendRequest [%v]: Received message from response channel. %v, %v\n", c.id, message, ok)
+		log.Debug().Msgf("SendRequest [%v]: Received message from response channel. %v, %v\n", c.id, message, ok)
 
 		if !ok {
 			return nil, fmt.Errorf("Response channel for connection id %v and message id %v has been closed", c.id, request.MessageID)
@@ -102,7 +102,7 @@ func (c *connectionInstance) sendRequest(request *payload, maxWait time.Duration
 
 		return &message, nil
 	case <-ticker.C:
-		log.Printf("SendRequest [%v]: Time out for message id %v\n", c.id, request.MessageID)
+		log.Debug().Msgf("SendRequest [%v]: Time out for message id %v\n", c.id, request.MessageID)
 	}
 
 	delete(c.responseChannels, request.MessageID)
@@ -115,43 +115,66 @@ func (c *connectionInstance) sendRequest(request *payload, maxWait time.Duration
 // ensures that there is at most one reader on a connection by executing all
 // reads from this goroutine.
 func (c *connectionInstance) readPump() {
-	log.Printf("Read pump routine started: [%v]", c.id)
+	log.Debug().Msgf("Read pump routine started: [%v]", c.id)
 
 	defer func() {
 		// c.hub.unregister <- c
 		c.conn.Close()
 	}()
-	c.conn.SetReadLimit(maxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	c.setConnection()
 	for {
 		messageType, message, err := c.conn.ReadMessage()
-		fmt.Printf("readPump routine [%v]-> MessageType:%v, Body:%v, Err:%v\n", c.id, messageType, len(message), err)
+		log.Debug().Msgf("readPump routine [%v]-> MessageType:%v, Body:%v, Err:%v\n", c.id, messageType, len(message), err)
 		if err != nil {
 			break
 		}
-		if messageType == websocket.BinaryMessage {
-			payload, err := unmarshalPayload(message)
 
-			if err != nil {
-				log.Println(err)
-				break
-			}
-
-			fmt.Printf("readPump routine [%v]-> payload MessageType:%v, MessageId:%v\n", c.id, payload.MessageType, payload.MessageID)
-
-			switch payload.MessageType {
-			case RequestMessage:
-				c.manageRequestMessage(payload)
-			case ResponseMessage:
-				c.manageResponseMessage(payload)
-			}
+		switch messageType {
+		case websocket.BinaryMessage:
+			c.manageBinaryMessage(message)
+		case websocket.CloseMessage:
+			c.manageClose(message)
+			return
 		}
 	}
 }
 
+func (c *connectionInstance) setConnection() {
+	c.conn.SetReadLimit(maxMessageSize)
+	err := c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	if err != nil {
+		log.Err(err).Msg("SetReadDeadline")
+	}
+	c.conn.SetPongHandler(func(string) error {
+		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+}
+
+func (c *connectionInstance) manageClose(message []byte) {
+	log.Debug().Msgf("Close message is received: [%v]", c.id)
+	// Stop all go routine and ask to manager to remove this instance from the pool
+}
+
+func (c *connectionInstance) manageBinaryMessage(message []byte) {
+	payload, err := unmarshalPayload(message)
+
+	if err != nil {
+		log.Err(err).Msg("manageBinaryMessage")
+		return
+	}
+
+	log.Debug().Msgf("readPump routine [%v]-> payload MessageType:%v, MessageId:%v\n", c.id, payload.MessageType, payload.MessageID)
+
+	switch payload.MessageType {
+	case RequestMessage:
+		c.manageRequestMessage(payload)
+	case ResponseMessage:
+		c.manageResponseMessage(payload)
+	}
+}
+
 func (c *connectionInstance) writePump() {
-	log.Println("Write pump routine started")
+	log.Debug().Msg("Write pump routine started")
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
@@ -160,13 +183,22 @@ func (c *connectionInstance) writePump() {
 	for {
 		select {
 		case message, ok := <-c.send:
-			log.Printf("writePump routine [%v]: received message from the send channel\n", c.id)
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			log.Debug().Msgf("writePump routine [%v]: received message from the send channel\n", c.id)
+			err := c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+
+			if err != nil {
+				log.Err(err).Msg("SetWriteDeadline")
+			}
 
 			if !ok {
 				// The hub closed the channel.
-				log.Printf("writePump routine [%v]: close message sent\n", c.id)
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				log.Debug().Msgf("writePump routine [%v]: close message sent\n", c.id)
+				err := c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+
+				if err != nil {
+					log.Err(err).Msg("Write close message error")
+				}
+
 				return
 			}
 
@@ -175,17 +207,26 @@ func (c *connectionInstance) writePump() {
 				return
 			}
 
-			w.Write(message)
+			_, err = w.Write(message)
+
+			if err != nil {
+				log.Err(err).Msg("Write message error")
+			}
 
 			if err := w.Close(); err != nil {
-				log.Printf("writePump routine [%v]: error on closing, exit from routine\n", c.id)
+				log.Debug().Msgf("writePump routine [%v]: error on closing, exit from routine\n", c.id)
 				return
 			}
 
-			log.Printf("writePump routine [%v]: message sent\n", c.id)
+			log.Debug().Msgf("writePump routine [%v]: message sent\n", c.id)
 		case <-ticker.C:
-			// log.Printf("writePump routine [%v]: ping message\n", c.id)
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			// log.Debug().Msgf("writePump routine [%v]: ping message\n", c.id)
+			err := c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+
+			if err != nil {
+				log.Err(err).Msg("SetWriteDeadline")
+			}
+
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
@@ -194,51 +235,51 @@ func (c *connectionInstance) writePump() {
 }
 
 func (c *connectionInstance) manageRequestMessage(payload *payload) {
-	log.Printf("manageRequestMessage [%v] %v\n", c.id, payload.MessageID)
-	r, err := payload.getRequestWithDestinationUrl(c.httpDestinationBaseUrl)
+	log.Debug().Msgf("manageRequestMessage [%v] %v\n", c.id, payload.MessageID)
+	r, err := payload.getRequestWithDestinationURL(c.httpDestinationBaseURL)
 
 	if err != nil {
-		log.Println(err)
+		log.Err(err).Msg("manageRequestMessage")
 		return
 	}
 
 	res, err := http.DefaultClient.Do(r)
 
 	if err != nil {
-		log.Printf("manageRequestMessage [%v]-> Err: %v\n", c.id, err)
+		log.Debug().Msgf("manageRequestMessage [%v]-> Err: %v\n", c.id, err)
 		return
 	}
 
 	responsePayload, err := createResponseMessage(res, payload.MessageID)
 
 	if err != nil {
-		log.Printf("manageRequestMessage [%v]-> Err: %v\n", c.id, err)
+		log.Debug().Msgf("manageRequestMessage [%v]-> Err: %v\n", c.id, err)
 		return
 	}
 
 	err = c.sendResponseAsync(responsePayload)
 
 	if err != nil {
-		log.Printf("manageRequestMessage [%v]-> Err: %v\n", c.id, err)
+		log.Debug().Msgf("manageRequestMessage [%v]-> Err: %v\n", c.id, err)
 		return
 	}
 }
 
 func (c *connectionInstance) manageResponseMessage(payload *payload) {
-	log.Printf("manageResponseMessage [%v] %v\n", c.id, payload.MessageID)
+	log.Debug().Msgf("manageResponseMessage [%v] %v\n", c.id, payload.MessageID)
 	res, err := payload.getResponse()
 
 	if err != nil {
-		log.Println(err)
+		log.Err(err).Msg("manageResponseMessage")
 		return
 	}
 
 	if channel, ok := c.responseChannels[payload.MessageID]; ok {
-		log.Printf("manageResponseMessage [%v]-> channel (%v) found for message id %v: %v %v\n", c.id, channel, payload.MessageID, res.Status, res.StatusCode)
+		log.Debug().Msgf("manageResponseMessage [%v]-> channel (%v) found for message id %v: %v %v\n", c.id, channel, payload.MessageID, res.Status, res.StatusCode)
 		channel <- *res
 	} else {
-		log.Printf("manageResponseMessage [%v] channel NOT found for message id %v\n", c.id, payload.MessageID)
+		log.Debug().Msgf("manageResponseMessage [%v] channel NOT found for message id %v\n", c.id, payload.MessageID)
 	}
 
-	log.Printf("manageResponseMessage [%v] Exit. %v\n", c.id, payload.MessageID)
+	log.Debug().Msgf("manageResponseMessage [%v] Exit. %v\n", c.id, payload.MessageID)
 }

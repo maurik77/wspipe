@@ -60,11 +60,11 @@ func (m *payload) marshal() ([]byte, error) {
 }
 
 func unmarshalPayload(message []byte) (*payload, error) {
-	messageId, err := uuid.FromBytes(message[1:17])
+	messageID, err := uuid.FromBytes(message[1:17])
 
 	payload := payload{
 		MessageType: message[0],
-		MessageID:   messageId,
+		MessageID:   messageID,
 		Message:     message[17:],
 	}
 
@@ -93,14 +93,14 @@ func (m *payload) getRequest() (*http.Request, error) {
 	return r, err
 }
 
-func (m *payload) getRequestWithDestinationUrl(httpDestinationBaseUrl string) (*http.Request, error) {
+func (m *payload) getRequestWithDestinationURL(httpDestinationBaseURL string) (*http.Request, error) {
 	r, err := m.getRequest()
 
 	if err != nil {
 		return r, err
 	}
 
-	u, err := url.Parse(fmt.Sprintf("%v%v", httpDestinationBaseUrl, r.RequestURI))
+	u, err := url.Parse(fmt.Sprintf("%v%v", httpDestinationBaseURL, r.RequestURI))
 	if err != nil {
 		return r, err
 	}

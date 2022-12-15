@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/maurik77/wspipe/connection"
+	"github.com/rs/zerolog/log"
 )
 
 var upgrader = websocket.Upgrader{
@@ -23,62 +23,73 @@ func main() {
 	destination := flag.String("s", "http://localhost:9222", "http destination")
 	port := flag.Int("p", 8082, "listen port")
 	role := flag.String("r", "client", "role: client\\server")
-	wsUrl := flag.String("w", "", "websocket server url")
+	wsURL := flag.String("w", "", "websocket server url")
 
 	flag.Parse()
-
-	log.Println("Port:", *port, "Role:", *role, "WsUrl:", *wsUrl)
+	log.Debug().Msgf("Port: %v, Role: %v, WsUrl: %v, Destination: %v", *port, *role, *wsURL, *destination)
 
 	connectionManager := connection.New(*role)
 
 	if *role == connection.ClientRole {
-		manageClient(wsUrl, connectionManager, destination)
+		manageClient(wsURL, connectionManager, destination)
 	} else {
 		manageServer(connectionManager, destination)
 	}
 
-	//The base url used to route all requests
-	http.HandleFunc("/route/", requestHandler(connectionManager))
+	// The base url used to route all requests
+	http.HandleFunc("/route/", routingHandler(connectionManager))
 	listen := fmt.Sprintf(":%v", *port)
-	http.ListenAndServe(listen, nil)
+
+	server := &http.Server{
+		Addr:              listen,
+		ReadHeaderTimeout: 3 * time.Second,
+	}
+
+	err := server.ListenAndServe()
+
+	if err != nil {
+		log.Err(err).Msg("ListenAndServe")
+	}
 }
 
 func manageServer(connectionManager *connection.Manager, destination *string) {
 	http.HandleFunc("/ws/", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Received websocket connection request: %v", r.URL)
-		connectionId, ok := getConnectionId(r)
-		log.Printf("Connection established. Connection Id: %v", *connectionId)
+		log.Debug().Msgf("Received websocket connection request: %v", r.URL)
+		connectionID, ok := getConnectionID(r)
+		log.Debug().Msgf("Connection established. Connection Id: %v", *connectionID)
 
 		if !ok {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("Missing connection id"))
+			writeMissingConnectionID(w)
 			return
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 
 		if err != nil {
-			log.Println(err)
+			log.Err(err).Msg("Upgrade error")
 			return
 		}
 
-		connectionManager.AddConnectionToPool(destination, conn, *connectionId)
+		connectionManager.AddConnectionToPool(destination, conn, *connectionID)
 	})
 }
 
-func manageClient(wsUrl *string, connectionManager *connection.Manager, destination *string) {
+func manageClient(wsURL *string, connectionManager *connection.Manager, destination *string) {
 	uuid := uuid.NewString()
-	wsTargetUrl := fmt.Sprintf("%v/%v", *wsUrl, uuid)
-	log.Printf("Connection establishing with url: %v", wsTargetUrl)
-	conn, _, err := websocket.DefaultDialer.Dial(wsTargetUrl, nil)
+	wsTargetURL := fmt.Sprintf("%v/%v", *wsURL, uuid)
+	log.Debug().Msgf("Connection establishing with url: %v", wsTargetURL)
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsTargetURL, nil)
 	if err != nil {
-		log.Fatal(err)
+		log.Err(err).Msg("Upgrade error")
+		log.Fatal().Msg("Upgrade")
 	}
-	log.Println("Connection established")
+
+	log.Debug().Msg("Connection established")
 	connectionManager.AddConnectionToPool(destination, conn, uuid)
 }
 
-func getConnectionId(r *http.Request) (*string, bool) {
+func getConnectionID(r *http.Request) (*string, bool) {
 	uriSegments := strings.Split(r.URL.Path, "/")
 
 	if len(uriSegments) > 1 {
@@ -88,18 +99,17 @@ func getConnectionId(r *http.Request) (*string, bool) {
 	return nil, false
 }
 
-func requestHandler(conn *connection.Manager) func(http.ResponseWriter, *http.Request) {
+func routingHandler(conn *connection.Manager) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Http request: %v %v", r.Method, r.RequestURI)
+		log.Debug().Msgf("Http request: %v %v", r.Method, r.RequestURI)
 
-		var connectionID *string = nil
+		var connectionID *string
 
 		if conn.Role == connection.ServerRole {
-			connID, ok := getConnectionId(r)
+			connID, ok := getConnectionID(r)
 
 			if !ok {
-				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte("Missing connection id"))
+				writeMissingConnectionID(w)
 				return
 			}
 
@@ -109,12 +119,25 @@ func requestHandler(conn *connection.Manager) func(http.ResponseWriter, *http.Re
 		response, err := conn.SendRequest(r, connectionID, 10*time.Second)
 
 		if err != nil {
-			log.Println(err)
+			log.Err(err).Msg("SendRequest")
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(fmt.Sprint(err)))
+			_, err = w.Write([]byte(fmt.Sprint(err)))
+
+			if err != nil {
+				log.Err(err).Msg("Write body response error")
+			}
 		} else {
 			writeResponse(w, response)
 		}
+	}
+}
+
+func writeMissingConnectionID(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusInternalServerError)
+	_, err := w.Write([]byte("Missing connection id"))
+
+	if err != nil {
+		log.Err(err).Msg("Write body response error")
 	}
 }
 
@@ -132,8 +155,14 @@ func writeResponse(w http.ResponseWriter, res *http.Response) {
 	// Write the response body
 	bodyContent, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Println(err)
-	} else {
-		w.Write(bodyContent)
+		log.Err(err).Msg("Read original response body")
+		return
+	}
+
+	_, err = w.Write(bodyContent)
+
+	if err != nil {
+		log.Err(err).Msg("Write response body error")
+		return
 	}
 }

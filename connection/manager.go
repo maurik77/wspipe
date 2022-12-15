@@ -25,11 +25,11 @@ func New(role string) *Manager {
 	}
 }
 
-func (c *Manager) Add(connectionID string, conn *connectionInstance) {
+func (c *Manager) add(connectionID string, conn *connectionInstance) {
 	c.clients[connectionID] = conn
 }
 
-func (c *Manager) Get(connectionID string) *connectionInstance {
+func (c *Manager) get(connectionID string) *connectionInstance {
 	if val, ok := c.clients[connectionID]; ok {
 		return val
 	}
@@ -46,7 +46,7 @@ func (c *Manager) SendRequestAsync(r *http.Request, connectionID *string) (chan 
 			break
 		}
 	} else {
-		connection = c.Get(*connectionID)
+		connection = c.get(*connectionID)
 	}
 
 	if connection == nil {
@@ -71,7 +71,7 @@ func (c *Manager) SendRequest(r *http.Request, connectionID *string, maxWait tim
 			break
 		}
 	} else {
-		connection = c.Get(*connectionID)
+		connection = c.get(*connectionID)
 	}
 
 	if connection == nil {
@@ -94,6 +94,6 @@ func (c *Manager) AddConnectionToPool(destination *string, conn *websocket.Conn,
 		connectionID,
 	)
 
-	c.Add(connectionID, connection)
+	c.add(connectionID, connection)
 	connection.Start()
 }
