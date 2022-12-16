@@ -12,16 +12,16 @@ import (
 
 const (
 	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
+	defaultWriteWait = 10 * time.Second
 
 	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
+	defaultPongWait = 60 * time.Second
 
 	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
+	defaultPingPeriod = (defaultPongWait * 9) / 10
 
 	// Maximum message size allowed from peer.
-	maxMessageSize = 512
+	defaultMaxMessageSize = 512
 )
 
 type connectionInstance struct {
@@ -31,15 +31,27 @@ type connectionInstance struct {
 	send                   chan []byte
 	id                     string
 	responseChannels       map[uuid.UUID]chan http.Response
+	writeWait              time.Duration
+	pongWait               time.Duration
+	pingPeriod             time.Duration
+	maxMessageSize         int64
 }
 
-func newInstance(conn *websocket.Conn, httpDestinationBaseURL string, id string) *connectionInstance {
+func newInstance(conn *websocket.Conn, httpDestinationBaseURL string, id string, opts ...Option) *connectionInstance {
 	connection := &connectionInstance{
 		conn:                   conn,
 		httpDestinationBaseURL: httpDestinationBaseURL,
 		id:                     id,
 		send:                   make(chan []byte, 256),
 		responseChannels:       make(map[uuid.UUID]chan http.Response),
+		writeWait:              defaultWriteWait,
+		pongWait:               defaultPongWait,
+		pingPeriod:             defaultPingPeriod,
+		maxMessageSize:         defaultMaxMessageSize,
+	}
+
+	for _, opt := range opts {
+		connection = opt.applyOption(connection)
 	}
 
 	return connection
@@ -141,13 +153,13 @@ func (c *connectionInstance) readPump() {
 }
 
 func (c *connectionInstance) setConnection() {
-	c.conn.SetReadLimit(maxMessageSize)
-	err := c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetReadLimit(c.maxMessageSize)
+	err := c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 	if err != nil {
 		log.Err(err).Msg("SetReadDeadline")
 	}
 	c.conn.SetPongHandler(func(string) error {
-		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 	})
 }
 
@@ -176,7 +188,7 @@ func (c *connectionInstance) manageBinaryMessage(message []byte) {
 
 func (c *connectionInstance) writePump() {
 	log.Debug().Msg("Write pump routine started")
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(c.pingPeriod)
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()
@@ -185,7 +197,7 @@ func (c *connectionInstance) writePump() {
 		select {
 		case message, ok := <-c.send:
 			log.Debug().Msgf("writePump routine [%v]: received message from the send channel", c.id)
-			err := c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			err := c.conn.SetWriteDeadline(time.Now().Add(c.writeWait))
 
 			if err != nil {
 				log.Err(err).Msg("SetWriteDeadline")
@@ -222,7 +234,7 @@ func (c *connectionInstance) writePump() {
 			log.Debug().Msgf("writePump routine [%v]: message sent", c.id)
 		case <-ticker.C:
 			// log.Debug().Msgf("writePump routine [%v]: ping message", c.id)
-			err := c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			err := c.conn.SetWriteDeadline(time.Now().Add(c.writeWait))
 
 			if err != nil {
 				log.Err(err).Msg("SetWriteDeadline")

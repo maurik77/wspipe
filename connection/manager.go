@@ -14,14 +14,16 @@ const (
 )
 
 type Manager struct {
-	Role    string
-	clients map[string]*connectionInstance
+	Role              string
+	clients           map[string]*connectionInstance
+	connectionOptions []Option
 }
 
-func New(role string) *Manager {
+func New(role string, opts ...Option) *Manager {
 	return &Manager{
-		clients: make(map[string]*connectionInstance),
-		Role:    role,
+		clients:           make(map[string]*connectionInstance),
+		Role:              role,
+		connectionOptions: opts,
 	}
 }
 
@@ -92,6 +94,7 @@ func (c *Manager) AddConnectionToPool(destination *string, conn *websocket.Conn,
 		conn,
 		*destination,
 		connectionID,
+		c.connectionOptions...,
 	)
 
 	c.add(connectionID, connection)
