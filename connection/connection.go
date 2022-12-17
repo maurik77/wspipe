@@ -35,9 +35,10 @@ type connectionInstance struct {
 	pongWait               time.Duration
 	pingPeriod             time.Duration
 	maxMessageSize         int64
+	unregister             func()
 }
 
-func newInstance(conn *websocket.Conn, httpDestinationBaseURL string, id string, opts ...Option) *connectionInstance {
+func newInstance(conn *websocket.Conn, httpDestinationBaseURL string, id string, unregister func(), opts ...Option) *connectionInstance {
 	connection := &connectionInstance{
 		conn:                   conn,
 		httpDestinationBaseURL: httpDestinationBaseURL,
@@ -48,6 +49,7 @@ func newInstance(conn *websocket.Conn, httpDestinationBaseURL string, id string,
 		pongWait:               defaultPongWait,
 		pingPeriod:             defaultPingPeriod,
 		maxMessageSize:         defaultMaxMessageSize,
+		unregister:             unregister,
 	}
 
 	for _, opt := range opts {
@@ -129,16 +131,15 @@ func (c *connectionInstance) sendRequest(request *payload, maxWait time.Duration
 func (c *connectionInstance) readPump() {
 	log.Debug().Msgf("Read pump routine started: [%v]", c.id)
 
-	defer func() {
-		// c.hub.unregister <- c
-		c.conn.Close()
-	}()
+	defer c.close()
 	c.setConnection()
+
 	for {
 		messageType, message, err := c.conn.ReadMessage()
 		log.Debug().Msgf("readPump routine [%v]-> MessageType:%v, Body:%v, Err:%+v", c.id, messageType, len(message), err)
 
 		if err != nil {
+			log.Err(err).Msgf("readPump routine [%v]-> MessageType:%v", c.id, messageType)
 			break
 		}
 
@@ -146,9 +147,19 @@ func (c *connectionInstance) readPump() {
 		case websocket.BinaryMessage:
 			c.manageBinaryMessage(message)
 		case websocket.CloseMessage:
-			c.manageClose(message)
-			return
+			break
 		}
+	}
+}
+
+func (c *connectionInstance) close() {
+	log.Info().Msgf("Close: unregistered, send channel closed, websocket connection closed [%v]", c.id)
+	c.unregister()
+	close(c.send)
+	err := c.conn.Close()
+
+	if err != nil {
+		log.Err(err).Msg("close")
 	}
 }
 
@@ -161,11 +172,6 @@ func (c *connectionInstance) setConnection() {
 	c.conn.SetPongHandler(func(string) error {
 		return c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 	})
-}
-
-func (c *connectionInstance) manageClose(message []byte) {
-	log.Debug().Msgf("Close message is received: [%v]", c.id)
-	// Stop all go routine and ask to manager to remove this instance from the pool
 }
 
 func (c *connectionInstance) manageBinaryMessage(message []byte) {

@@ -40,19 +40,10 @@ func (c *Manager) get(connectionID string) *connectionInstance {
 }
 
 func (c *Manager) SendRequestAsync(r *http.Request, connectionID *string) (chan http.Response, error) {
-	var connection *connectionInstance
+	connection, err := c.getConnection(connectionID)
 
-	if connectionID == nil {
-		for k := range c.clients {
-			connection = c.clients[k]
-			break
-		}
-	} else {
-		connection = c.get(*connectionID)
-	}
-
-	if connection == nil {
-		return nil, fmt.Errorf("Unable to find connection with id %v", *connectionID)
+	if err != nil {
+		return nil, err
 	}
 
 	message, err := createRequestMessage(r)
@@ -65,6 +56,22 @@ func (c *Manager) SendRequestAsync(r *http.Request, connectionID *string) (chan 
 }
 
 func (c *Manager) SendRequest(r *http.Request, connectionID *string, maxWait time.Duration) (*http.Response, error) {
+	connection, err := c.getConnection(connectionID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	message, err := createRequestMessage(r)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return connection.sendRequest(message, maxWait)
+}
+
+func (c *Manager) getConnection(connectionID *string) (*connectionInstance, error) {
 	var connection *connectionInstance
 
 	if connectionID == nil {
@@ -79,14 +86,7 @@ func (c *Manager) SendRequest(r *http.Request, connectionID *string, maxWait tim
 	if connection == nil {
 		return nil, fmt.Errorf("Unable to find connection with id %v", *connectionID)
 	}
-
-	message, err := createRequestMessage(r)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return connection.sendRequest(message, maxWait)
+	return connection, nil
 }
 
 func (c *Manager) AddConnectionToPool(destination *string, conn *websocket.Conn, connectionID string) {
@@ -94,9 +94,14 @@ func (c *Manager) AddConnectionToPool(destination *string, conn *websocket.Conn,
 		conn,
 		*destination,
 		connectionID,
+		func() { c.unregisterConnection(connectionID) },
 		c.connectionOptions...,
 	)
 
 	c.add(connectionID, connection)
 	connection.start()
+}
+
+func (c *Manager) unregisterConnection(connectionID string) {
+	delete(c.clients, connectionID)
 }
