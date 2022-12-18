@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/maurik77/wspipe/connection"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
@@ -20,13 +22,20 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
+	setup()
 	destination := flag.String("s", "http://localhost:9222", "http destination")
 	port := flag.Int("p", 8082, "listen port")
 	role := flag.String("r", "client", "role: client\\server")
 	wsURL := flag.String("w", "", "websocket server url")
+	debug := flag.Bool("debug", true, "sets log level to debug")
 
 	flag.Parse()
-	log.Debug().Msgf("Port: %v, Role: %v, WsUrl: %v, Destination: %v", *port, *role, *wsURL, *destination)
+	log.Debug().Msgf("port: %v, role: %v, wsUrl: %v, destination: %v, debug: %v", *port, *role, *wsURL, *destination, debug)
+
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	if *debug {
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	}
 
 	connectionManager := connection.New(*role)
 
@@ -165,4 +174,14 @@ func writeResponse(w http.ResponseWriter, res *http.Response) {
 		log.Err(err).Msg("Write response body error")
 		return
 	}
+}
+
+func setup() {
+
+	zerolog.TimeFieldFormat = ""
+
+	zerolog.TimestampFunc = func() time.Time {
+		return time.Date(2008, 1, 8, 17, 5, 05, 0, time.UTC)
+	}
+	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
 }
